@@ -1,0 +1,10 @@
+nhttp: A fast and powerful HTTP server in around 200 lines of C
+
+#Usage
+
+#Todo
+Switch from shared libraries to .c files.
+Add support for other operating systems.
+
+#License
+GPLv3 unless otherwise specified
