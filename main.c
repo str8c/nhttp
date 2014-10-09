@@ -1,12 +1,21 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <dlfcn.h>
+
+#ifndef PORT
+#define PORT 80
+#endif
+
+#define CONN_TIMEOUT 10 /* max time allowed between accepting connection and receiving full http request */
+#define MAX_REQUEST_SIZE 0x10000
 
 typedef struct {
     int sock, rlen;
@@ -26,8 +35,13 @@ static struct {
     uint8_t padding[8];
 } addr = {
     .family = AF_INET,
-    .port = 257,
+    .port = __bswap_constant_16(PORT),
 };
+
+static const struct itimerspec itimer = {
+    .it_interval = {.tv_sec = CONN_TIMEOUT}, .it_value = {.tv_sec = CONN_TIMEOUT},
+};
+
 
 static const char
     error404[] = "HTTP/1.0 404\r\nContent-type: text/html\r\n\r\n"
@@ -82,10 +96,7 @@ static _Bool do_request(int sock, int rlen, char *request)
         return 1;
     }
 
-    a = path;
-    while(a != limit && *a != ' ') {
-        a++;
-    }
+    for(a = path; a != limit && *a != ' '; a++);
     *a = 0;
 
     getlibname(libname, path, NULL);
@@ -109,15 +120,18 @@ static void client_free(CLIENT *cl)
 {
     close(cl->sock);
     free(cl->request);
-    free(cl);
+    cl->sock = -1;
 }
 
 int main(int argc, char *argv[])
 {
-    int efd, sock, n, client, len;
+    int efd, tfd, sock, n, client, len;
     socklen_t addrlen;
+    uint64_t exp;
     struct epoll_event events[16], *ev, *ev_last;
-    CLIENT *cl;
+    CLIENT *cl, *cend, *cl_list[2];
+    int cl_count[2];
+    _Bool list;
 
     if((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         return 1;
@@ -128,37 +142,51 @@ int main(int argc, char *argv[])
 
     if(bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         printf("bind() failed\n");
-        return 1;
+        goto EXIT_CLOSE_SOCK;
     }
 
     if(listen(sock, SOMAXCONN) < 0) {
-        return 1;
+        goto EXIT_CLOSE_SOCK;
     }
 
+    if((tfd = timerfd_create(CLOCK_MONOTONIC, 0)) < 0) {
+        goto EXIT_CLOSE_SOCK;
+    }
+
+    timerfd_settime(tfd, 0, &itimer, NULL);
+
     if((efd = epoll_create(1)) < 0) {
-        return 1;
+        goto EXIT_CLOSE_TFD;
     }
 
     ev = &events[0];
     ev->events = EPOLLIN;
     ev->data.ptr = NULL;
     epoll_ctl(efd, EPOLL_CTL_ADD, sock, ev); //check epoll_ctl error
+    ev->events = EPOLLIN;
+    ev->data.ptr = (void*)1;
+    epoll_ctl(efd, EPOLL_CTL_ADD, tfd, ev); //check epoll_ctl error
 
-    //todo: add timeouts http://linux.die.net/man/2/timerfd_create
     //use edge-triggered mode
-    //cleanup when initiation fails and on exit
 
     //lib system init
     if(!(libconfig = dlopen("./config.so", RTLD_NOW | RTLD_LOCAL))) {
         fprintf(stderr, "dlopen failed: %s\n", dlerror());
         printf("no config file\n");
-        return 1;
+        goto EXIT_CLOSE_EFD;
     }
 
     if(!(getlibname = dlsym(libconfig, "getlibname"))) {
        printf("invalid config file\n");
-       return 1;
+       goto EXIT_CLOSE_CONFIG;
     }
+
+    addrlen = 0;
+    list = 0;
+    cl_list[0] = NULL;
+    cl_list[1] = NULL;
+    cl_count[0] = 0;
+    cl_count[1] = 0;
 
     do {
         if((n = epoll_wait(efd, events, 16, -1)) < 0) {
@@ -168,22 +196,41 @@ int main(int argc, char *argv[])
         ev = events;
         ev_last = ev + n;
         do {
-            if(!ev->data.ptr) {
+            if(!ev->data.ptr) { /* listening socket event */
+                printf("alpha %i %i\n", sock, addrlen);
                 if((client = accept(sock, (struct sockaddr*)&addr, &addrlen)) < 0) {
+                    printf("accept failed\n");
                     continue;
                 }
 
-                printf("accepted\n");
+                if(!(cl = realloc(cl_list[list], (cl_count[list] + 1) * sizeof(CLIENT)))) {
+                    continue;
+                }
 
-                cl = malloc(sizeof(*cl)); //check malloc error
+                cl_list[list] = cl;
+                cl += cl_count[list]++;
                 cl->sock = client;
                 cl->rlen = 0;
-                cl->request = malloc(2048); //check malloc error
+                cl->request = malloc(2048); //handle malloc error
 
                 ev->events = EPOLLIN;// | EPOLLET;
                 ev->data.ptr = cl;
-                epoll_ctl(efd, EPOLL_CTL_ADD, client, ev); //check epoll_ctl error
-            } else {
+                epoll_ctl(efd, EPOLL_CTL_ADD, client, ev); //handle epoll_ctl error
+            } else if(ev->data.ptr == (void*)1) { /* timerfd event */
+                read(tfd, &exp, 8);
+                list = !list;
+                if(cl_count[list]) {
+                    cl = cl_list[list];
+                    cend = cl + cl_count[list];
+                    cl_count[list] = 0;
+                    do {
+                        if(cl->sock >= 0) {
+                            client_free(cl); //does not need to set sock=-1
+                        }
+                    } while(++cl != cend);
+                }
+                /* write above as a for() loop? */
+            } else { /* client socket event */
                 cl = ev->data.ptr;
                 if((len = recv(cl->sock, cl->request, 2048, 0)) <= 0) {
                     client_free(cl);
@@ -191,7 +238,7 @@ int main(int argc, char *argv[])
                 }
 
                 cl->rlen += len;
-                cl->request = realloc(cl->request, cl->rlen + 2048); //check realloc error
+                cl->request = realloc(cl->request, cl->rlen + 2048); //handle realloc error
 
                 printf("read on fd\n%.*s\n", cl->rlen, cl->request);
 
@@ -202,5 +249,13 @@ int main(int argc, char *argv[])
         } while(ev++, ev != ev_last);
     } while(1);
 
-    return 0;
+EXIT_CLOSE_CONFIG:
+    dlclose(libconfig);
+EXIT_CLOSE_EFD:
+    close(efd);
+EXIT_CLOSE_TFD:
+    close(tfd);
+EXIT_CLOSE_SOCK:
+    close(sock);
+    return 1;
 }
