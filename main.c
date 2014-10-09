@@ -10,6 +10,12 @@
 #include <arpa/inet.h>
 #include <dlfcn.h>
 
+#ifdef DEBUG
+#define debug(...) printf(__VA_ARGS__)
+#else
+#define debug(...)
+#endif
+
 #ifndef PORT
 #define PORT 80
 #endif
@@ -100,7 +106,7 @@ static _Bool do_request(int sock, int rlen, char *request)
     *a = 0;
 
     getlibname(libname, path, NULL);
-    printf("request path: %s\nrequest lib: %s\n", path, libname);
+    debug("request path: %s\nrequest lib: %s\n", path, libname);
     if(!(lib = libs_get(libname))) {
         printf("invalid lib\n");
         return 1;
@@ -171,8 +177,7 @@ int main(int argc, char *argv[])
 
     //lib system init
     if(!(libconfig = dlopen("./config.so", RTLD_NOW | RTLD_LOCAL))) {
-        fprintf(stderr, "dlopen failed: %s\n", dlerror());
-        printf("no config file\n");
+        printf("dlopen failed: %s\n", dlerror());
         goto EXIT_CLOSE_EFD;
     }
 
@@ -197,9 +202,8 @@ int main(int argc, char *argv[])
         ev_last = ev + n;
         do {
             if(!ev->data.ptr) { /* listening socket event */
-                printf("alpha %i %i\n", sock, addrlen);
                 if((client = accept(sock, (struct sockaddr*)&addr, &addrlen)) < 0) {
-                    printf("accept failed\n");
+                    debug("accept failed\n");
                     continue;
                 }
 
@@ -240,7 +244,7 @@ int main(int argc, char *argv[])
                 cl->rlen += len;
                 cl->request = realloc(cl->request, cl->rlen + 2048); //handle realloc error
 
-                printf("read on fd\n%.*s\n", cl->rlen, cl->request);
+                debug("read on fd\n%.*s\n", cl->rlen, cl->request);
 
                 if(do_request(cl->sock, cl->rlen, cl->request)) {
                     client_free(cl);
