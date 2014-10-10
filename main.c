@@ -1,3 +1,4 @@
+ #define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -5,10 +6,16 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <dlfcn.h>
+
+/* ISSUES
+    -cant be used to host large files (whole files are loaded into memory when requested),
+        also because it kills connections after CONN_TIMEOUT seconds to prevent some attacks
+*/
 
 #ifdef DEBUG
 #define debug(...) printf(__VA_ARGS__)
@@ -20,19 +27,20 @@
 #define PORT 80
 #endif
 
-#define CONN_TIMEOUT 10 /* max time allowed between accepting connection and receiving full http request */
-#define MAX_REQUEST_SIZE 0x10000
+#define CONN_TIMEOUT 20 /* max time allowed between accepting connection and sending reponse*/
+#define MAX_REQUEST_SIZE 0x10000 /* maximum size of POST requests allowed */
 
 typedef struct {
-    int sock, rlen;
-    char *request;
+    int sock, dlen, sent, post;
+    char *data;
+    int padding[2];
 } CLIENT;
 
 typedef struct {
     char name[12];
     uint32_t last_modified;
     void *lib;
-    int (*getpage)(char *dest, char *path, char *post);
+    int (*getpage)(void *data, char *path, char *post);
 } LIB;
 
 static struct {
@@ -49,13 +57,26 @@ static const struct itimerspec itimer = {
 };
 
 
-static const char
-    error404[] = "HTTP/1.0 404\r\nContent-type: text/html\r\n\r\n"
-                "<html>"
-                "<head><title>404 Not Found</title></head>"
-                "<body bgcolor=\"white\"><center><h1>404 Not Found</h1></center><hr></body>"
-                "</html>",
-    header[] = "HTTP/1.0 200\r\nContent-type: text/html; charset=utf-8\r\n\r\n";
+static const char error404[] = "HTTP/1.0 404\r\nContent-type: text/html\r\n\r\n"
+    "<html>"
+    "<head><title>404 Not Found</title></head>"
+    "<body bgcolor=\"white\"><center><h1>404 Not Found</h1></center><hr></body>"
+    "</html>";
+
+#define HEADER(x) "HTTP/1.0 200\r\nContent-type: " x "\r\n\r\n"
+#define HLEN(x) (sizeof(HEADER(x)) - 1)
+
+enum {
+    TEXT_HTML, IMAGE_PNG,
+};
+
+static const char* header[] = {
+    HEADER("text/html; charset=utf-8"), HEADER("image/png"),
+};
+
+static int header_length[] = {
+    HLEN("text/html; charset=utf-8"), HLEN("image/png"),
+};
 
 static void *libconfig;
 static void (*getlibname)(char *dest, char *path, char *host);
@@ -79,27 +100,38 @@ static LIB* libs_get(char *name)
     return NULL;
 }
 
-/* GET requests are always single-read (up to 2048 large),
-   POST requests can be up to 64k
- */
+static void client_free(CLIENT *cl)
+{
+    close(cl->sock);
+    free(cl->data);
+    cl->sock = -1;
+}
 
-static _Bool do_request(int sock, int rlen, char *request)
+/* handle http request
+    HTTP header must always be complete (single read), only POST data can be incomplete
+*/
+static void do_request(CLIENT *cl)
 {
     uint32_t type;
-    int len;
+    int len, k;
     char libname[64];
     char *path, *limit, *a;
     LIB *lib;
-    char tmp[32768];
 
-    limit = request + rlen;
-    type = *(uint32_t*)request;
+    struct {
+        void *data;
+        int type;
+        char buf[32768 - 12];
+    } info;
+
+    limit = cl->data + cl->dlen;
+    type = *(uint32_t*)cl->data;
     if(type == htonl('GET ')) {
-        path = request + 4;
+        path = cl->data + 4;
     } else if(type == htonl('POST')) {
-        path = request + 5;
+        path = cl->data + 5;
     } else {
-        return 1;
+        client_free(cl); return;
     }
 
     for(a = path; a != limit && *a != ' '; a++);
@@ -108,30 +140,36 @@ static _Bool do_request(int sock, int rlen, char *request)
     getlibname(libname, path, NULL);
     debug("request path: %s\nrequest lib: %s\n", path, libname);
     if(!(lib = libs_get(libname))) {
-        printf("invalid lib\n");
-        return 1;
+        client_free(cl); return;
     }
 
-    if((len = lib->getpage(tmp, path, NULL)) < 0) {
-        send(sock, error404, sizeof(error404) - 1, 0);
+    info.data = NULL;
+    info.type = 0;
+    if((len = lib->getpage(&info, path, NULL)) < 0) {
+        send(cl->sock, error404, sizeof(error404) - 1, 0);
     } else {
-        send(sock, header, sizeof(header) - 1, 0);
-        send(sock, tmp, len, 0);
+        send(cl->sock, header[info.type], header_length[info.type], 0);
+
+        k = send(cl->sock, (info.data ? info.data : info.buf), len, 0);
+        if(k < len) {
+            if(k >= 0) {
+                len -= k;
+                cl->dlen = -len;
+                cl->sent = 0;
+                cl->data = realloc(cl->data, len); //handle realloc error
+                memcpy(cl->data, (info.data ? info.data : info.buf) + k, len);
+                return;
+            }
+        }
+        free(info.data);
     }
-
-    return 1;
-}
-
-static void client_free(CLIENT *cl)
-{
-    close(cl->sock);
-    free(cl->request);
-    cl->sock = -1;
+    client_free(cl);
 }
 
 int main(int argc, char *argv[])
 {
-    int efd, tfd, sock, n, client, len;
+    int efd, tfd, sock, client; /* file descriptors and sockets */
+    int n, len;
     socklen_t addrlen;
     uint64_t exp;
     struct epoll_event events[16], *ev, *ev_last;
@@ -173,8 +211,6 @@ int main(int argc, char *argv[])
     ev->data.ptr = (void*)1;
     epoll_ctl(efd, EPOLL_CTL_ADD, tfd, ev); //check epoll_ctl error
 
-    //use edge-triggered mode
-
     //lib system init
     if(!(libconfig = dlopen("./config.so", RTLD_NOW | RTLD_LOCAL))) {
         printf("dlopen failed: %s\n", dlerror());
@@ -202,7 +238,7 @@ int main(int argc, char *argv[])
         ev_last = ev + n;
         do {
             if(!ev->data.ptr) { /* listening socket event */
-                if((client = accept(sock, (struct sockaddr*)&addr, &addrlen)) < 0) {
+                if((client = accept4(sock, (struct sockaddr*)&addr, &addrlen, SOCK_NONBLOCK)) < 0) {
                     debug("accept failed\n");
                     continue;
                 }
@@ -214,10 +250,10 @@ int main(int argc, char *argv[])
                 cl_list[list] = cl;
                 cl += cl_count[list]++;
                 cl->sock = client;
-                cl->rlen = 0;
-                cl->request = malloc(2048); //handle malloc error
+                cl->dlen = 0;
+                cl->data = NULL;
 
-                ev->events = EPOLLIN;// | EPOLLET;
+                ev->events = (EPOLLIN | EPOLLOUT) | EPOLLET;
                 ev->data.ptr = cl;
                 epoll_ctl(efd, EPOLL_CTL_ADD, client, ev); //handle epoll_ctl error
             } else if(ev->data.ptr == (void*)1) { /* timerfd event */
@@ -232,23 +268,42 @@ int main(int argc, char *argv[])
                             client_free(cl); //does not need to set sock=-1
                         }
                     } while(++cl != cend);
-                }
-                /* write above as a for() loop? */
+                } /* write above as a for() loop? */
             } else { /* client socket event */
                 cl = ev->data.ptr;
-                if((len = recv(cl->sock, cl->request, 2048, 0)) <= 0) {
-                    client_free(cl);
+                if(cl->dlen < 0) { /* waiting for EPOLLOUT */
+                    if(!(ev->events & EPOLLOUT)) {
+                        continue;
+                    }
+
+                    n = -cl->dlen;
+                    len = send(cl->sock, cl->data + cl->sent, n, 0);
+                    if(len < 0) {
+                        client_free(cl);
+                        continue;
+                    }
+                    cl->sent += len;
+                    cl->dlen += len;
+                    if(cl->dlen == 0) {
+                        client_free(cl);
+                    }
                     continue;
                 }
 
-                cl->rlen += len;
-                cl->request = realloc(cl->request, cl->rlen + 2048); //handle realloc error
-
-                debug("read on fd\n%.*s\n", cl->rlen, cl->request);
-
-                if(do_request(cl->sock, cl->rlen, cl->request)) {
-                    client_free(cl);
+                if(!(ev->events & EPOLLIN)) { /* no data available */
+                    continue;
                 }
+
+                ioctl(cl->sock, FIONREAD, &len); /* get bytes available */
+                cl->data = realloc(cl->data, cl->dlen + len); //handle realloc error
+
+                cl = ev->data.ptr;
+                if(recv(cl->sock, cl->data + cl->dlen, len, 0) != len) {
+                    client_free(cl);
+                    continue;
+                }
+                cl->dlen += len;
+                do_request(cl);
             }
         } while(ev++, ev != ev_last);
     } while(1);
