@@ -1,9 +1,5 @@
- #define _GNU_SOURCE
-#include <stdlib.h>
-#include <stdio.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <string.h>
+#include "nhttp.h"
+#define __USE_GNU
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -28,7 +24,7 @@
 #endif
 
 #define CONN_TIMEOUT 20 /* max time allowed between accepting connection and sending reponse*/
-#define MAX_REQUEST_SIZE 0x10000 /* maximum size of POST requests allowed */
+#define POST_MAX 0x10000 /* maximum size of POST requests allowed */
 
 typedef struct {
     int sock, dlen, sent, post;
@@ -40,7 +36,7 @@ typedef struct {
     char name[12];
     uint32_t last_modified;
     void *lib;
-    int (*getpage)(void *data, char *path, char *post);
+    int (*getpage)(void *data, char *path, char *post, int postlen);
 } LIB;
 
 static struct {
@@ -66,10 +62,6 @@ static const char error404[] = "HTTP/1.0 404\r\nContent-type: text/html\r\n\r\n"
 #define HEADER(x) "HTTP/1.0 200\r\nContent-type: " x "\r\n\r\n"
 #define HLEN(x) (sizeof(HEADER(x)) - 1)
 
-enum {
-    TEXT_HTML, IMAGE_PNG,
-};
-
 static const char* header[] = {
     HEADER("text/html; charset=utf-8"), HEADER("image/png"),
 };
@@ -79,7 +71,7 @@ static int header_length[] = {
 };
 
 static void *libconfig;
-static void (*getlibname)(char *dest, char *path, char *host);
+static char* (*getlibname)(char *dest, char *path, char *host);
 
 static LIB* libs_get(char *name)
 {
@@ -110,13 +102,15 @@ static void client_free(CLIENT *cl)
 /* handle http request
     HTTP header must always be complete (single read), only POST data can be incomplete
 */
+#define INVALID_REQUEST client_free(cl); return
 static void do_request(CLIENT *cl)
 {
     uint32_t type;
-    int len, k;
+    int len, k, content_length;
     char libname[64];
-    char *path, *limit, *a;
+    char *path, *a, *host, *post;
     LIB *lib;
+    bool _post;
 
     struct {
         void *data;
@@ -124,28 +118,95 @@ static void do_request(CLIENT *cl)
         char buf[32768 - 12];
     } info;
 
-    limit = cl->data + cl->dlen;
+    //printf("%.*s\n", cl->dlen, cl->data);
+
+    if(cl->dlen < 6) {
+        INVALID_REQUEST;
+    }
+
+    cl->data[cl->dlen] = 0; /* work in null-terminated space */
+
     type = *(uint32_t*)cl->data;
     if(type == htonl('GET ')) {
         path = cl->data + 4;
+        _post = 0;
     } else if(type == htonl('POST')) {
         path = cl->data + 5;
+        _post = 1;
+        content_length = -1;
     } else {
-        client_free(cl); return;
+        INVALID_REQUEST;
     }
 
-    for(a = path; a != limit && *a != ' '; a++);
-    *a = 0;
+    if(*path++ != '/') { /* first characted of request path always '/' */
+        INVALID_REQUEST;
+    }
 
-    getlibname(libname, path, NULL);
-    debug("request path: %s\nrequest lib: %s\n", path, libname);
+    /* find the end of requested path */
+    for(a = path; *a != ' '; a++) {
+        if(!*a) {
+            INVALID_REQUEST;
+        }
+    }
+    *a++ = 0;
+
+    /* find the Host: and Content-Length (if POST) */
+    host = NULL;
+    do {
+    CONTINUE:
+        do {
+            if(!*a) {
+                INVALID_REQUEST;
+            }
+            if(*a == '\r' && *(a + 1) == '\n') {
+                *a = 0;
+                a += 2;
+                break;
+            }
+            a++;
+        } while(1);
+
+        if(!memcmp(a, "Host: ", 6)) {
+            a += 6;
+            host = a;
+            goto CONTINUE;
+        }
+
+        if(_post && !memcmp(a, "Content-Length: ", 16)) {
+            content_length = strtol(a + 16, &a, 0);
+            goto CONTINUE;
+        }
+    } while(*a != '\r' || *(a + 1) != '\n');
+
+    if(!host) {
+        INVALID_REQUEST;
+    }
+
+    if(_post) {
+        if(content_length < 0) {
+            INVALID_REQUEST;
+        }
+
+        post = a + 2;
+        k = cl->data + cl->dlen - post;
+        //printf("%u %i\n", k, content_length);
+        if(k < content_length) {
+            return; /* wait for more data */
+        }
+    } else {
+        post = NULL;
+    }
+
+    //printf("%i\n%s\n%s\n", content_length, path, host);
+
+    path = getlibname(libname, path, host);
     if(!(lib = libs_get(libname))) {
         client_free(cl); return;
     }
 
     info.data = NULL;
     info.type = 0;
-    if((len = lib->getpage(&info, path, NULL)) < 0) {
+    if((len = lib->getpage(&info, path, post, content_length)) < 0) {
         send(cl->sock, error404, sizeof(error404) - 1, 0);
     } else {
         send(cl->sock, header[info.type], header_length[info.type], 0);
@@ -295,7 +356,12 @@ int main(int argc, char *argv[])
                 }
 
                 ioctl(cl->sock, FIONREAD, &len); /* get bytes available */
-                cl->data = realloc(cl->data, cl->dlen + len); //handle realloc error
+                if(cl->dlen + len > POST_MAX) {
+                    client_free(cl);
+                    continue;
+                }
+
+                cl->data = realloc(cl->data, cl->dlen + len + 1); //handle realloc error
 
                 cl = ev->data.ptr;
                 if(recv(cl->sock, cl->data + cl->dlen, len, 0) != len) {

@@ -1,35 +1,23 @@
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-
-typedef struct {
-    void *data;
-    int type;
-    char buf[0];
-} PAGEINFO;
+#include "../nhttp.h"
 
 int filetype(const char *path)
 {
     do {
         if(!strcmp(path, ".png")) {
-            return 1;
+            return IMAGE_PNG;
         }
     } while(*(++path));
-    return 0;
+    return TEXT_HTML;
 }
 
-int getpage(PAGEINFO *p, const char *path, const char *post)
+int getpage(PAGEINFO *p, const char *path, const char *post, int postlen)
 {
     FILE *file;
     int len;
     const char *filepath;
 
-    if(path[0] != '/') {
-        return -1;
-    }
-
-    filepath = path + 1;
-    if(!path[1]) {
+    filepath = path;
+    if(!*path) {
         filepath = "index.html";
     }
 
