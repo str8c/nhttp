@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <dlfcn.h>
+#include <errno.h>
 
 /* ISSUES
     -cant be used to host large files (whole files are loaded into memory when requested),
@@ -296,8 +297,8 @@ int main(int argc, char *argv[])
 
     do {
         if((n = epoll_wait(efd, events, 16, -1)) < 0) {
-            printf("epoll error\n");
-            break;
+            printf("epoll error %i\n", errno);
+            continue;
         }
 
         ev = events;
