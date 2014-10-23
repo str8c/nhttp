@@ -296,7 +296,7 @@ int main(int argc, char *argv[])
     cl_count[1] = 0;
 
     do {
-        if((n = epoll_wait(efd, events, 16, -1)) < 0) {
+        if((n = epoll_wait(efd, events, 1, -1)) < 0) {
             printf("epoll error %i\n", errno);
             continue;
         }
