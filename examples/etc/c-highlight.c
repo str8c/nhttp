@@ -31,7 +31,7 @@ static const char* keywords[] = {
 /* TODO: use dest_max to prevent overflow */
 char* c_highlight(char *dest, char *dest_max, char *src)
 {
-    char ch, *w;
+    char ch, quotechar, *w;
     bool num, first, escape, preproc;
 
     st(header);
@@ -120,8 +120,9 @@ char* c_highlight(char *dest, char *dest_max, char *src)
             goto escape;
         }
 
-        if(!escape && ch == '\"') {
+        if(!escape && (ch == '"' || ch == '\'' )) {
             st("<tt>");
+            quotechar = ch;
             escape = 1;
             goto start2;
             do {
@@ -134,7 +135,7 @@ char* c_highlight(char *dest, char *dest_max, char *src)
                 escapehtml(ch);
             start2:
                 *dest++ = ch;
-            } while(escape || ch != '"');
+            } while(escape || ch != quotechar);
             st("</tt>");
             continue;
         }
