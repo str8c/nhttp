@@ -14,6 +14,7 @@
         also because it kills connections after CONN_TIMEOUT seconds to prevent some attacks
     TODO
     -dont parse entire HTTP request again everytime new POST data arrives
+    -partial HTTP requests (usually receive complete request, but slow proxies break this rule)
 */
 
 #ifdef DEBUG
@@ -26,7 +27,7 @@
 #define PORT 80
 #endif
 
-#define CONN_TIMEOUT 20 /* max time allowed between accepting connection and sending reponse*/
+#define CONN_TIMEOUT 20 /* max time allowed between accepting connection and sending reponse */
 #define POST_MAX 0x10000 /* maximum size of POST requests allowed */
 
 #define _htons(x) __bswap_constant_16(x)
@@ -39,7 +40,7 @@ typedef struct {
 } CLIENT;
 
 typedef struct {
-    char name[12];
+    char path[12 + 32];
     uint32_t last_modified;
     void *lib;
     int (*getpage)(void *data, char *path, char *post, int postlen);
@@ -78,19 +79,19 @@ static int header_length[] = {
 static void *libconfig;
 static char* (*getlibname)(char *dest, char *path, char *host);
 
-static LIB* libs_get(char *name)
+static LIB* libs_get(char *path)
 {
     static LIB libs[64];
     LIB *lib;
 
-    for(lib = libs; lib->name[0]; lib++) {
-        if(!strcmp(lib->name, name)) {
+    for(lib = libs; lib->path[0]; lib++) {
+        if(!strcmp(lib->path, path)) {
             return lib->getpage ? lib : NULL;
         }
     }
 
-    strcpy(lib->name, name);
-    if((lib->lib = dlopen(name, RTLD_NOW | RTLD_LOCAL)) && (lib->getpage = dlsym(lib->lib, "getpage"))) {
+    strcpy(lib->path, path);
+    if((lib->lib = dlopen(path, RTLD_NOW | RTLD_LOCAL)) && (lib->getpage = dlsym(lib->lib, "getpage"))) {
         return lib;
     }
 
@@ -115,11 +116,7 @@ static void do_request(CLIENT *cl)
     LIB *lib;
     bool _post;
 
-    struct {
-        void *data;
-        int type;
-        char buf[32768 - 12];
-    } info;
+    PAGEINFO info;
 
     debug("%.*s\n", cl->dlen, cl->data);
 
@@ -145,8 +142,10 @@ static void do_request(CLIENT *cl)
     }
 
     /* find the end of requested path */
+    len = 0;
     for(a = path; *a != ' '; a++) {
-        if(!*a) {
+        if(++len >= 256 || !*a || (*a == '.' && *(a + 1) == '/')) {
+            /* dont allow long paths or paths with aliases */
             goto INVALID_REQUEST;
         }
     }
