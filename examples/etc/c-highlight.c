@@ -36,6 +36,7 @@ char* c_highlight(char *dest, char *dest_max, char *src)
 
     st(header);
 
+    num = 0;
     first = 1;
     preproc = 0;
 
@@ -141,6 +142,7 @@ char* c_highlight(char *dest, char *dest_max, char *src)
         if(first && ch == '#') {
             st("<i>");
             preproc = 1;
+            escape = 0;
         }
 
         first = 0;

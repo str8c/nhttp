@@ -1,5 +1,4 @@
 #include <string.h>
-#include <stdio.h>
 
 #define prefix(x, y) !strncmp(x, y, sizeof(y) - 1)
 #define suffix(x, len, y) !(len < (sizeof(y) - 1) || strcmp(x + len - (sizeof(y) - 1), y))
@@ -19,8 +18,6 @@ char* getlibname(char *dest, char *path, char *host)
     } else {
         strcpy(dest, "./static.so");
     }
-
-    printf("%s %s\n", path, dest);
 
     return path;
 }

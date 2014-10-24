@@ -59,11 +59,13 @@ static const struct itimerspec itimer = {
     .it_interval = {.tv_sec = CONN_TIMEOUT}, .it_value = {.tv_sec = CONN_TIMEOUT},
 };
 
-static const char error404[] = "HTTP/1.0 404\r\nContent-type: text/html\r\n\r\n"
-    "<html>"
-    "<head><title>404 Not Found</title></head>"
-    "<body bgcolor=\"white\"><center><h1>404 Not Found</h1></center><hr></body>"
-    "</html>";
+#define error_html(a, b) "HTTP/1.0 " a "\r\nContent-type: text/html\r\n\r\n" \
+    "<html><head><title>" a " " b "</title></head>" \
+    "<body bgcolor=\"white\"><center><h1>" a " " b "</h1></center><hr></body></html>" \
+
+static const char
+    error404[] = error_html("404", "Not Found"),
+    error502[] = error_html("502", "Bad Gateway");
 
 #define HEADER(x) "HTTP/1.0 200\r\nContent-type: " x "\r\n\r\n"
 #define HLEN(x) (sizeof(HEADER(x)) - 1)
@@ -202,7 +204,8 @@ static void do_request(CLIENT *cl)
 
     path = getlibname(libname, path, host);
     if(!(lib = libs_get(libname))) {
-        client_free(cl); return;
+        send(cl->sock, error502, sizeof(error502) - 1, 0);
+        goto INVALID_REQUEST;
     }
 
     info.data = NULL;
