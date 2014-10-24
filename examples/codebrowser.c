@@ -48,6 +48,19 @@ static char* (*highlight[])(char*, char*, char*) = {
 };
 
 
+static int dirsort(const struct dirent **a, const struct dirent **b)
+{
+    const struct dirent *dir, *dir2;
+
+    dir = *a;
+    dir2 = *b;
+    if(dir->d_type != dir2->d_type) {
+        return (dir->d_type == DT_DIR ? -1 : 1);
+    }
+
+    return strcmp(dir->d_name, dir2->d_name);
+}
+
 export int getpage(PAGEINFO *p, char *path, const char *post, int postlen)
 {
     FILE *file;
@@ -101,12 +114,12 @@ export int getpage(PAGEINFO *p, char *path, const char *post, int postlen)
     return str - p->buf; }
 
 directory:; /* requested is a directory */
-    DIR *d;
-    struct dirent *dir;
+    int n, i;
+    struct dirent **dirs, *dir;
     char *dest;
 
-    d = opendir(filepath);
-    if(!d) {
+    n = scandir(filepath, &dirs, NULL, dirsort);
+    if(n < 0) {
         return -1;
     }
 
@@ -120,19 +133,20 @@ directory:; /* requested is a directory */
     }
 
     st("<ul>");
-    while((dir = readdir(d))) {
-        if(dir->d_name[0] == '.') {
-            continue;
-        }
+    for(i = 0; i != n; i++) {
+        dir = dirs[i];
 
-        if(dir->d_type == DT_DIR) {
+        if(dir->d_name[0] == '.') {
+        } else if(dir->d_type == DT_DIR) {
             dest += sprintf(dest, "<li><a href=\"%s/\">%s/</a></li>", dir->d_name, dir->d_name);
         } else {
             dest += sprintf(dest, "<li><a href=\"%s\">%s</a></li>", dir->d_name, dir->d_name);
         }
+
+        free(dir);
     }
     st("</ul></pre></body></html>");
 
-    closedir(d);
+    free(dirs);
     return dest - p->buf;
 }
