@@ -39,10 +39,11 @@ char* c_highlight(char *dest, char *dest_max, char *src)
     num = 0;
     first = 1;
     preproc = 0;
+    ch = 0;
 
     w = NULL;
     do {
-        escape = (ch == '\\');
+        escape = (ch == '\\' && !escape);
         ch = *src;
         if(!ch) {
             break;
@@ -126,7 +127,7 @@ char* c_highlight(char *dest, char *dest_max, char *src)
             escape = 1;
             goto start2;
             do {
-                escape = (ch == '\\');
+                escape = (ch == '\\' && !escape);
                 ch = *(++src);
                 if(!ch) {
                     goto breakout;
