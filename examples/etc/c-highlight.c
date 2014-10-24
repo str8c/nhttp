@@ -42,6 +42,7 @@ char* c_highlight(char *dest, char *dest_max, char *src)
 
     w = NULL;
     do {
+        escape = (ch == '\\');
         ch = *src;
         if(!ch) {
             break;
@@ -116,11 +117,10 @@ char* c_highlight(char *dest, char *dest_max, char *src)
         }
 
         if(preproc) {
-            escape = (ch == '\\');
             goto escape;
         }
 
-        if(ch == '\"') {
+        if(!escape && ch == '\"') {
             st("<tt>");
             escape = 1;
             goto start2;
