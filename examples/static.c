@@ -1,6 +1,6 @@
 #include "../nhttp.h"
 
-int filetype(const char *path)
+static int filetype(const char *path)
 {
     do {
         if(!strcmp(path, ".png")) {
@@ -14,11 +14,17 @@ int getpage(PAGEINFO *p, const char *path, const char *post, int postlen)
 {
     FILE *file;
     int len;
-    const char *filepath;
+    char *str;
 
-    filepath = path;
-    if(!*path) {
-        filepath = "index.html";
+    /* prepend path with ROOT */
+    len = strlen(path);
+    char filepath[len + sizeof(ROOT)];
+    strcpy(filepath, ROOT);
+    str = filepath + sizeof(ROOT) - 1;
+    memcpy(str, path, len + 1);
+
+    if(!*str) {
+        strcpy(str, "index.html");
     }
 
     if(!(file = fopen(filepath, "rb"))) {
@@ -29,7 +35,7 @@ int getpage(PAGEINFO *p, const char *path, const char *post, int postlen)
     len = ftell(file);
     fseek(file, 0, SEEK_SET);
 
-    if(len >= 32756) {
+    if(len > sizeof(p->buf)) {
         p->data = malloc(len);
         if(!p->data) {
             return -1;
@@ -41,6 +47,6 @@ int getpage(PAGEINFO *p, const char *path, const char *post, int postlen)
 
     fclose(file);
 
-    p->type = filetype(filepath);
+    p->type = filetype(str);
     return len;
 }
