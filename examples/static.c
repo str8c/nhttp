@@ -10,7 +10,7 @@ static int filetype(const char *path)
     return TEXT_HTML;
 }
 
-int getpage(PAGEINFO *p, const char *path, const char *post, int postlen)
+int export(static, getpage)(PAGEINFO *p, const char *path, const char *post, int postlen)
 {
     FILE *file;
     int len;

@@ -61,7 +61,7 @@ static int dirsort(const struct dirent **a, const struct dirent **b)
     return strcmp(dir->d_name, dir2->d_name);
 }
 
-export int getpage(PAGEINFO *p, char *path, const char *post, int postlen)
+int export(code, getpage)(PAGEINFO *p, char *path, const char *post, int postlen)
 {
     FILE *file;
     int len, type;

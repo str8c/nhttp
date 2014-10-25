@@ -5,8 +5,6 @@
 #include <string.h>
 #include <ctype.h>
 
-#define export __attribute__ ((visibility ("default")))
-
 enum {
     TEXT_HTML, IMAGE_PNG,
 };
@@ -16,3 +14,8 @@ typedef struct {
     int type;
     char buf[32768 - 12];
 } PAGEINFO;
+
+typedef int (GETPAGE)(PAGEINFO*, const char*, const char*, int);
+
+#define export(x, y) x##_##y
+#define import(x) GETPAGE x##_getpage

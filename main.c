@@ -17,6 +17,8 @@
     -partial HTTP requests (usually receive complete request, but slow proxies break this rule)
 */
 
+char* getconfig(GETPAGE **getpage, char *path, char *host);
+
 #ifdef DEBUG
 #define debug(...) printf(__VA_ARGS__)
 #else
@@ -38,13 +40,6 @@ typedef struct {
     char *data;
     int padding[2];
 } CLIENT;
-
-typedef struct {
-    char path[12 + 32];
-    uint32_t last_modified;
-    void *lib;
-    int (*getpage)(void *data, char *path, char *post, int postlen);
-} LIB;
 
 static struct {
     uint16_t family, port;
@@ -78,28 +73,6 @@ static int header_length[] = {
     HLEN("text/html; charset=utf-8"), HLEN("image/png"),
 };
 
-static void *libconfig;
-static char* (*getlibname)(char *dest, char *path, char *host);
-
-static LIB* libs_get(char *path)
-{
-    static LIB libs[64];
-    LIB *lib;
-
-    for(lib = libs; lib->path[0]; lib++) {
-        if(!strcmp(lib->path, path)) {
-            return lib->getpage ? lib : NULL;
-        }
-    }
-
-    strcpy(lib->path, path);
-    if((lib->lib = dlopen(path, RTLD_NOW | RTLD_LOCAL)) && (lib->getpage = dlsym(lib->lib, "getpage"))) {
-        return lib;
-    }
-
-    return NULL;
-}
-
 static void client_free(CLIENT *cl)
 {
     close(cl->sock);
@@ -113,10 +86,9 @@ static void client_free(CLIENT *cl)
 static void do_request(CLIENT *cl)
 {
     int len, k, content_length;
-    char libname[64];
     char *path, *a, *host, *post;
-    LIB *lib;
     bool _post;
+    GETPAGE *getpage;
 
     PAGEINFO info;
 
@@ -201,16 +173,15 @@ static void do_request(CLIENT *cl)
     }
 
     //printf("%i\n%s\n%s\n", content_length, path, host);
-
-    path = getlibname(libname, path, host);
-    if(!(lib = libs_get(libname))) {
+    path = getconfig(&getpage, path, host);
+    if(!getpage) {
         send(cl->sock, error502, sizeof(error502) - 1, 0);
         goto INVALID_REQUEST;
     }
 
     info.data = NULL;
     info.type = 0;
-    if((len = lib->getpage(&info, path, post, content_length)) < 0) {
+    if((len = getpage(&info, path, post, content_length)) < 0) {
         send(cl->sock, error404, sizeof(error404) - 1, 0);
     } else {
         send(cl->sock, header[info.type], header_length[info.type], 0);
@@ -278,17 +249,6 @@ int main(int argc, char *argv[])
     ev->events = EPOLLIN;
     ev->data.ptr = (void*)1;
     epoll_ctl(efd, EPOLL_CTL_ADD, tfd, ev); //check epoll_ctl error
-
-    //lib system init
-    if(!(libconfig = dlopen("./config.so", RTLD_NOW | RTLD_LOCAL))) {
-        printf("dlopen failed: %s\n", dlerror());
-        goto EXIT_CLOSE_EFD;
-    }
-
-    if(!(getlibname = dlsym(libconfig, "getlibname"))) {
-       printf("invalid config file\n");
-       goto EXIT_CLOSE_CONFIG;
-    }
 
     addrlen = 0;
     list = 0;
@@ -383,9 +343,6 @@ int main(int argc, char *argv[])
         } while(ev++, ev != ev_last);
     } while(1);
 
-EXIT_CLOSE_CONFIG:
-    dlclose(libconfig);
-EXIT_CLOSE_EFD:
     close(efd);
 EXIT_CLOSE_TFD:
     close(tfd);
