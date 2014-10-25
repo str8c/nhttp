@@ -18,13 +18,13 @@ int export(static, getpage)(PAGEINFO *p, const char *path, const char *post, int
 
     /* prepend path with ROOT */
     len = strlen(path);
-    char filepath[len + sizeof(ROOT)];
+    char filepath[(len ? len : (sizeof("index.html") - 1)) + sizeof(ROOT)];
     strcpy(filepath, ROOT);
     str = filepath + sizeof(ROOT) - 1;
-    memcpy(str, path, len + 1);
-
-    if(!*str) {
+    if(!len) {
         strcpy(str, "index.html");
+    } else {
+        memcpy(str, path, len + 1);
     }
 
     if(!(file = fopen(filepath, "rb"))) {
