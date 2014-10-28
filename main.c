@@ -265,11 +265,11 @@ int main(int argc, char *argv[])
     ev = &events[0];
 
     ev->events = EPOLLIN;
-    ev->data.ptr = NULL;
+    ev->data.u32 = -1;
     epoll_ctl(efd, EPOLL_CTL_ADD, sock, ev); //check epoll_ctl error
 
     ev->events = EPOLLIN;
-    ev->data.ptr = (void*)1;
+    ev->data.u32 = -2;
     epoll_ctl(efd, EPOLL_CTL_ADD, tfd, ev); //check epoll_ctl error
 
     addrlen = 0;
@@ -295,32 +295,36 @@ int main(int argc, char *argv[])
         ev = events;
         ev_last = ev + n;
         do {
-            if(!ev->data.ptr) { /* listening socket event */
-                client = accept4(sock, (struct sockaddr*)&addr, &addrlen, SOCK_NONBLOCK);
-                if(client < 0) {
-                    debug("accept failed\n");
-                    continue;
+            n = (int32_t)ev->data.u32;
+            if(n < 0) {
+                if(n == -1) {
+                    client = accept4(sock, (struct sockaddr*)&addr, &addrlen, SOCK_NONBLOCK);
+                    if(client < 0) {
+                        debug("accept failed\n");
+                        continue;
+                    }
+
+                    cl = realloc(cl_list[list], (cl_count[list] + 1) * sizeof(CLIENT));
+                    if(!cl) {
+                        close(client);
+                        continue;
+                    }
+
+                    cl_list[list] = cl;
+                    n = cl_count[list]++;
+                    cl += n;
+                    cl->sock = client;
+                    cl->dlen = 0;
+                    cl->data = NULL;
+
+                    ev->events = (EPOLLIN | EPOLLOUT) | EPOLLET;
+                    ev->data.u64 = ((uint64_t)list << 32) | n;
+                    epoll_ctl(efd, EPOLL_CTL_ADD, client, ev);
+                } else { /* timerfd event */
+                    read(tfd, &exp, 8); timerevent = 1;
                 }
-
-                cl = realloc(cl_list[list], (cl_count[list] + 1) * sizeof(CLIENT));
-                if(!cl) {
-                    continue;
-                }
-
-                cl_list[list] = cl;
-                cl += cl_count[list]++;
-                cl->sock = client;
-                cl->dlen = 0;
-                cl->data = NULL;
-
-                ev->events = (EPOLLIN | EPOLLOUT) | EPOLLET;
-                ev->data.ptr = cl;
-                epoll_ctl(efd, EPOLL_CTL_ADD, client, ev);
-                /* ignore epoll_ctl error, client will get timeouted */
-            } else if(ev->data.ptr == (void*)1) { /* timerfd event */
-                read(tfd, &exp, 8); timerevent = 1;
             } else { /* client socket event */
-                cl = ev->data.ptr;
+                cl = &cl_list[ev->data.u64 >> 32][n];
                 if(cl->dlen < 0) { /* waiting for EPOLLOUT */
                     if(!(ev->events & EPOLLOUT)) {
                         continue;
