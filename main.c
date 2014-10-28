@@ -29,7 +29,7 @@ char* getconfig(GETPAGE **getpage, char *path, char *host);
 #define PORT 80
 #endif
 
-#define CONN_TIMEOUT 20 /* max time allowed between accepting connection and sending reponse */
+#define TIMEOUT 20 /* max time allowed between accepting connection and sending reponse */
 #define POST_MAX 0x10000 /* maximum size of POST requests allowed */
 
 #define _htons(x) __bswap_constant_16(x)
@@ -50,8 +50,8 @@ static struct {
     .port = _htons(PORT),
 };
 
-static const struct itimerspec itimer = {
-    .it_interval = {.tv_sec = CONN_TIMEOUT}, .it_value = {.tv_sec = CONN_TIMEOUT},
+static const struct itimerspec itimer = { /* TIMEOUT seconds timer */
+    .it_interval = {.tv_sec = TIMEOUT}, .it_value = {.tv_sec = TIMEOUT},
 };
 
 #define error_html(a, b) "HTTP/1.0 " a "\r\nContent-type: text/html\r\n\r\n" \
@@ -205,47 +205,69 @@ INVALID_REQUEST:
     client_free(cl);
 }
 
+static int tcp_init(void)
+{
+    int sock, r, one;
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if(sock < 0) {
+        return sock;
+    }
+
+    one = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (void*)&one, sizeof(int));
+
+    r = bind(sock, (struct sockaddr*)&addr, sizeof(addr));
+    if(r < 0) {
+        printf("bind() failed\n");
+        close(sock);
+        return r;
+    }
+
+    r = listen(sock, SOMAXCONN);
+    if(r < 0) {
+        close(sock);
+        return r;
+    }
+
+    return sock;
+}
+
 int main(int argc, char *argv[])
 {
-    int efd, tfd, sock, client; /* file descriptors and sockets */
-    int n, len;
+    int efd, tfd, sock, client, n, len;
+    struct epoll_event events[16], *ev, *ev_last;
     socklen_t addrlen;
     uint64_t exp;
-    struct epoll_event events[16], *ev, *ev_last;
+    char *data;
+
     CLIENT *cl, *cend, *cl_list[2];
     int cl_count[2];
-    bool list;
+    bool list, timerevent;
 
-    if((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    sock = tcp_init();
+    if(sock < 0) {
         return 1;
     }
 
-    n = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (void*)&n, sizeof(int));
-
-    if(bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        printf("bind() failed\n");
-        goto EXIT_CLOSE_SOCK;
-    }
-
-    if(listen(sock, SOMAXCONN) < 0) {
-        goto EXIT_CLOSE_SOCK;
-    }
-
-    if((tfd = timerfd_create(CLOCK_MONOTONIC, 0)) < 0) {
+    tfd = timerfd_create(CLOCK_MONOTONIC, 0);
+    if(tfd < 0) {
         goto EXIT_CLOSE_SOCK;
     }
 
     timerfd_settime(tfd, 0, &itimer, NULL);
 
-    if((efd = epoll_create(1)) < 0) {
+    efd = epoll_create(1);
+    if(efd < 0) {
         goto EXIT_CLOSE_TFD;
     }
 
     ev = &events[0];
+
     ev->events = EPOLLIN;
     ev->data.ptr = NULL;
     epoll_ctl(efd, EPOLL_CTL_ADD, sock, ev); //check epoll_ctl error
+
     ev->events = EPOLLIN;
     ev->data.ptr = (void*)1;
     epoll_ctl(efd, EPOLL_CTL_ADD, tfd, ev); //check epoll_ctl error
@@ -256,23 +278,32 @@ int main(int argc, char *argv[])
     cl_list[1] = NULL;
     cl_count[0] = 0;
     cl_count[1] = 0;
+    timerevent = 0;
 
     do {
-        if((n = epoll_wait(efd, events, 1, -1)) < 0) {
+        n = epoll_wait(efd, events, 16, -1);
+        if(n < 0) {
             printf("epoll error %i\n", errno);
             continue;
+        }
+
+        if(n == 0) { /* should never happen */
+            printf("epoll_wait returned 0\n");
+            break;
         }
 
         ev = events;
         ev_last = ev + n;
         do {
             if(!ev->data.ptr) { /* listening socket event */
-                if((client = accept4(sock, (struct sockaddr*)&addr, &addrlen, SOCK_NONBLOCK)) < 0) {
+                client = accept4(sock, (struct sockaddr*)&addr, &addrlen, SOCK_NONBLOCK);
+                if(client < 0) {
                     debug("accept failed\n");
                     continue;
                 }
 
-                if(!(cl = realloc(cl_list[list], (cl_count[list] + 1) * sizeof(CLIENT)))) {
+                cl = realloc(cl_list[list], (cl_count[list] + 1) * sizeof(CLIENT));
+                if(!cl) {
                     continue;
                 }
 
@@ -284,20 +315,10 @@ int main(int argc, char *argv[])
 
                 ev->events = (EPOLLIN | EPOLLOUT) | EPOLLET;
                 ev->data.ptr = cl;
-                epoll_ctl(efd, EPOLL_CTL_ADD, client, ev); //TODO handle epoll_ctl error
+                epoll_ctl(efd, EPOLL_CTL_ADD, client, ev);
+                /* ignore epoll_ctl error, client will get timeouted */
             } else if(ev->data.ptr == (void*)1) { /* timerfd event */
-                read(tfd, &exp, 8);
-                list = !list;
-                if(cl_count[list]) {
-                    cl = cl_list[list];
-                    cend = cl + cl_count[list];
-                    cl_count[list] = 0;
-                    do {
-                        if(cl->sock >= 0) {
-                            client_free(cl); //does not need to set sock=-1
-                        }
-                    } while(++cl != cend);
-                } /* write above as a for() loop? */
+                read(tfd, &exp, 8); timerevent = 1;
             } else { /* client socket event */
                 cl = ev->data.ptr;
                 if(cl->dlen < 0) { /* waiting for EPOLLOUT */
@@ -308,8 +329,7 @@ int main(int argc, char *argv[])
                     n = -cl->dlen;
                     len = send(cl->sock, cl->data + cl->sent, n, 0);
                     if(len < 0) {
-                        client_free(cl);
-                        continue;
+                        client_free(cl); continue;
                     }
                     cl->sent += len;
                     cl->dlen += len;
@@ -324,7 +344,8 @@ int main(int argc, char *argv[])
                 }
 
                 /* get bytes available */
-                if(ioctl(cl->sock, FIONREAD, &len) < 0) {
+                n = ioctl(cl->sock, FIONREAD, &len);
+                if(n < 0) {
                     debug("ioctl error %u\n", errno);
                     client_free(cl); continue;
                 }
@@ -333,16 +354,35 @@ int main(int argc, char *argv[])
                     client_free(cl); continue;
                 }
 
-                cl->data = realloc(cl->data, cl->dlen + len + 3); /* +1 for null terminator, minimum 4 bytes allocated */
-                //TODO handle realloc error
-
-                if(recv(cl->sock, cl->data + cl->dlen, len, 0) != len) {
+                data = realloc(cl->data, cl->dlen + len + 3);
+                /* +1 for null terminator, minimum 4 bytes allocated */
+                if(!data || recv(cl->sock, data + cl->dlen, len, 0) != len) {
                     client_free(cl); continue;
                 }
+
+                cl->data = data;
                 cl->dlen += len;
                 do_request(cl);
             }
         } while(ev++, ev != ev_last);
+
+        /* process timer event only after all other events */
+        if(timerevent) {
+            timerevent = 0;
+            debug("timer event\n");
+
+            list = !list;
+            if(cl_count[list]) {
+                cl = cl_list[list];
+                cend = cl + cl_count[list];
+                cl_count[list] = 0;
+                do {
+                    if(cl->sock >= 0) {
+                        client_free(cl); //does not need to set sock=-1
+                    }
+                } while(++cl != cend);
+            }
+        }
     } while(1);
 
     close(efd);
