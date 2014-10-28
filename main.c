@@ -323,19 +323,21 @@ int main(int argc, char *argv[])
                     continue;
                 }
 
-                ioctl(cl->sock, FIONREAD, &len); /* get bytes available */
+                /* get bytes available */
+                if(ioctl(cl->sock, FIONREAD, &len) < 0) {
+                    debug("ioctl error %u\n", errno);
+                    client_free(cl); continue;
+                }
+
                 if(cl->dlen + len > POST_MAX) {
-                    client_free(cl);
-                    continue;
+                    client_free(cl); continue;
                 }
 
                 cl->data = realloc(cl->data, cl->dlen + len + 3); /* +1 for null terminator, minimum 4 bytes allocated */
                 //TODO handle realloc error
 
-                cl = ev->data.ptr;
                 if(recv(cl->sock, cl->data + cl->dlen, len, 0) != len) {
-                    client_free(cl);
-                    continue;
+                    client_free(cl); continue;
                 }
                 cl->dlen += len;
                 do_request(cl);
