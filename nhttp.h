@@ -12,7 +12,7 @@ enum {
 typedef struct {
     void *data;
     int type;
-    char buf[32768 - 12];
+    char buf[1024 * 512 - 12];
 } PAGEINFO;
 
 typedef int (GETPAGE)(PAGEINFO*, const char*, const char*, int);
