@@ -1,10 +1,8 @@
-nhttp: A fast and powerful HTTP server in less than 300 lines of C
+nhttp: A fast and powerful HTTP server in less than 400 lines of C
 
 #Usage
-
-#Todo
-Switch from shared libraries to .c files using libcc when it is ready.
-Add support for other operating systems.
+For code examples for making a website with nhttp, see the examples/ folder or the nbbs project
+For compilation, simply compile and link the nhttp main.c along with your website. Example: build command for str8c.me website (http://str8c.me/code/etc/update_http.sh)
 
 #License
 GPLv3 unless otherwise specified
